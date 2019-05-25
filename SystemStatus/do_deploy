@@ -1,0 +1,74 @@
+#!/bin/bash
+
+build=true
+update_function=true
+deploy=false
+
+APP_STACK_NAME=system-status-service
+
+AWS_REGION=eu-west-1
+AWS_ARTIFACT_BUCKET=jl.test.1
+
+API_SERVICE_NAME=whazonk-ApiService
+PAGE_GEN_SERVICE_NAME=whazonk-PageGenerator
+
+SAM_TEMPLATE_FILE=template.yaml
+TMP_SAM_APP_FILE=xapp_sam_spec.yml
+
+
+if [ "$build" = true ] ; then
+    
+    rm ./${API_SERVICE_NAME}_service.zip
+    pushd ./ApiService/ && zip  -r ../${API_SERVICE_NAME}_service.zip * -x '*~' 'package-lock.json' && popd
+
+    rm ./${PAGE_GEN_SERVICE_NAME}_service.zip
+    pushd ./PageGenerator/ && npm install && zip  -r ../${PAGE_GEN_SERVICE_NAME}_service.zip * -x '*~' 'package-lock.json' && popd
+    
+    aws s3 cp ./${API_SERVICE_NAME}_service.zip s3://${AWS_ARTIFACT_BUCKET}
+    aws s3 cp ./${PAGE_GEN_SERVICE_NAME}_service.zip s3://${AWS_ARTIFACT_BUCKET}
+    
+fi
+
+
+if [ "$update_function" = true ] ; then
+
+    aws \
+        --region ${AWS_REGION} \
+        lambda update-function-code \
+        --function-name ${API_SERVICE_NAME} \
+        --zip-file fileb://./${API_SERVICE_NAME}_service.zip \
+        --publish
+    
+    aws \
+        --region ${AWS_REGION} \
+        lambda update-function-code \
+        --function-name ${PAGE_GEN_SERVICE_NAME} \
+        --zip-file fileb://./${PAGE_GEN_SERVICE_NAME}_service.zip \
+        --publish
+
+fi
+
+if [ "$deploy" = true ] ; then
+
+rm -v $TMP_SAM_APP_FILE
+
+aws \
+    --region ${AWS_REGION} \
+    cloudformation package \
+    --template-file $SAM_TEMPLATE_FILE \
+    --output-template-file $TMP_SAM_APP_FILE \
+    --s3-bucket ${AWS_ARTIFACT_BUCKET}
+
+
+aws cloudformation deploy \
+    --template-file $TMP_SAM_APP_FILE  \
+    --stack-name ${APP_STACK_NAME} \
+    --capabilities CAPABILITY_IAM \
+    --parameter-overrides \
+      DynamoDbName=SystemStatusDB \
+      AwsArtifactBucket=${AWS_ARTIFACT_BUCKET} \
+      ApiServiceLambdaFunctionName=${API_SERVICE_NAME} \
+      PageGenFunctionName=${PAGE_GEN_SERVICE_NAME} \
+      DataStoreBucketName=${DATA_STORE_BUCKET_NAME}
+
+fi

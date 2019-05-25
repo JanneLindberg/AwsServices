@@ -1,0 +1,267 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Service API Endpoint
+Parameters:
+  AwsArtifactBucket:
+    Type: String
+    
+  AwsArtifactCodeKey:
+    Type: String
+    
+  DynamoDbName:
+    Type: String
+    
+  ApiServiceLambdaFunctionName:
+    Description: Api Lambda Function.
+    Type: String
+    MinLength: 1
+    MaxLength: 28
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9-]*$'
+    
+  PageGenFunctionName:
+    Description: Page generation lambda function.
+    Type: String
+    MinLength: 1
+    MaxLength: 28
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9-]*$'
+    
+  DataStoreBucketName:
+    Description: Page store root bucket
+    Type: String    
+
+Resources:
+  ApiServiceLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    DependsOn:
+    - AppSupportApi
+    - ApiServiceLambdaFunction
+    - PageGenFunctionLambda
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ApiServiceLambdaFunction
+      Principal: apigateway.amazonaws.com
+
+  AppSupportApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      DefinitionBody:
+        swagger: 2.0
+        info:
+          title:
+            Ref: AWS::StackName
+        paths:
+          "/":
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiServiceLambdaFunction.Arn}/invocations
+              responses:
+                "default":
+                  statusCode: "200"
+                  responseParameters:
+                    method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+                    method.response.header.Access-Control-Allow-Methods : "'*'"
+                    method.response.header.Access-Control-Allow-Origin : "'*'"
+
+            get:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiServiceLambdaFunction.Arn}/invocations
+              responses: {}
+
+            options:
+              summary: CORS support
+              description: |
+                Enable CORS by returning correct headers
+              consumes:
+                - application/json
+              produces:
+                - application/json
+              tags:
+                - CORS
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: |
+                    {
+                       "statusCode" : 200
+                    }
+                responses:
+                  "default":
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Headers : "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+                      method.response.header.Access-Control-Allow-Methods : "'*'"
+                      method.response.header.Access-Control-Allow-Origin : "'*'"
+                    responseTemplates:
+                      application/json: |
+                        {}
+              responses:
+                "200":
+                  description: Default response for CORS method
+                  headers:
+                    Access-Control-Allow-Headers:
+                      type: "string"
+                    Access-Control-Allow-Methods:
+                      type: "string"
+                    Access-Control-Allow-Origin:
+                      type: "string"
+
+  ApiServiceLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref ApiServiceLambdaFunctionName
+      Handler: index.handler
+      Runtime: nodejs10.x
+      CodeUri:
+        Bucket: !Ref AwsArtifactBucket
+        Key:
+          'Fn::Join':
+            - ''
+            - - !Ref ApiServiceLambdaFunctionName
+              - '_service.zip'
+
+      Description: Api Service
+      MemorySize: 128
+      Environment:
+        Variables:
+          debug: false
+          TABLE_NAME: !Ref DynamoDBTable
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - 'dynamodb:GetItem'
+                - 'dynamodb:PutItem'
+                - 'dynamodb:UpdateItem'
+                - 'dynamodb:Query'
+                - 'dynamodb:Scan'
+              Resource:
+                'Fn::Join':
+                  - ''
+                  - - 'arn:aws:dynamodb:'
+                    - Ref: 'AWS::Region'
+                    - ':'
+                    - Ref: 'AWS::AccountId'
+                    - ':table/'
+                    - Ref: DynamoDBTable
+                      
+      Events:
+        PostApi:
+          Type: Api
+          Properties:
+            Path: /
+            Method: POST
+            RestApiId:
+                Ref: AppSupportApi
+
+  PageGenFunctionLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Ref PageGenFunctionName
+      Handler: index.handler
+      Runtime: nodejs10.x
+      CodeUri:
+        Bucket: !Ref AwsArtifactBucket
+        Key:
+          'Fn::Join':
+            - ''
+            - - !Ref PageGenFunctionName
+              - '_service.zip'
+
+      Description: Render static pages from events
+      MemorySize: 128
+      Environment:
+        Variables:
+          DBG_ENABLED: '0'
+          MAX_PAGE_ENTRIES: 10
+          S3_DATA_STORE: !Ref DataStoreBucketName
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "dynamodb:DescribeStream"
+                - "dynamodb:GetRecords"
+                - "dynamodb:GetShardIterator"
+                - "dynamodb:ListStreams"
+              Resource:
+                - 'Fn::Join':
+                  - ''
+                  - - 'arn:aws:dynamodb:'
+                    - Ref: 'AWS::Region'
+                    - ':'
+                    - Ref: 'AWS::AccountId'
+                    - ':table/'
+                    - !Ref DynamoDBTable
+                    - '/stream/*'
+
+            - Effect: Allow
+              Action:
+                - "dynamodb:GetRecords"
+                - "dynamodb:PutItem"
+                - "dynamodb:UpdateItem"
+                - "dynamodb:DeleteItem"
+                - "dynamodb:Query"
+                - "dynamodb:Scan"
+              Resource:
+                'Fn::Join':
+                  - ''
+                  - - 'arn:aws:dynamodb:'
+                    - Ref: 'AWS::Region'
+                    - ':'
+                    - Ref: 'AWS::AccountId'
+                    - ':table/'
+                    - !Ref DynamoDBTable
+            - Effect: Allow
+              Action:
+                - "s3:PutObject"
+                - "s3:GetObject"
+                - "s3:DeleteObject"
+              Resource:
+                'Fn::Join':
+                  - ''
+                  - - 'arn:aws:s3:'
+                    - ':'
+                    - ':'
+                    - !Ref DataStoreBucketName
+                    - '/*'
+                  
+  EventTableStream:
+    Type: AWS::Lambda::EventSourceMapping
+    DependsOn:
+      - PageGenFunctionLambda
+    Properties:
+      BatchSize: 1
+      Enabled: True
+      EventSourceArn:
+        Fn::GetAtt: [ DynamoDBTable , StreamArn ]
+      FunctionName:
+        Fn::GetAtt: [ PageGenFunctionLambda , Arn ]
+      StartingPosition: LATEST
+
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDbName
+      AttributeDefinitions:
+        - AttributeName: systemId
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: systemId
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
